@@ -596,11 +596,12 @@ class TestInMemoryQueueMessageHandler:
         assert heartbeat_count > 0
 
     def test_stream_raises_when_heartbeat_timeout(self, handler, monkeypatch):
-        """心跳发送慢于超时阈值时，消费者应抛出心跳超时异常。"""
+        """心跳发送慢于超时阈值且超过延长阈值（TIMEOUT*4）时，消费者应抛出心跳超时异常。"""
         thread_id = "test_stream_heartbeat_timeout"
         helper = GeneratorStreamingHelper(handler, thread_id=thread_id)
         monkeypatch.setattr(streaming_helper_module, "HEARTBEAT_INTERVAL", 1.0)
-        monkeypatch.setattr(streaming_helper_module, "HEARTBEAT_TIMEOUT", 0.2)
+        # TIMEOUT*4=0.2s < 0.5s 首次 timeout，确保首次 TimeoutError 即超过延长阈值
+        monkeypatch.setattr(streaming_helper_module, "HEARTBEAT_TIMEOUT", 0.05)
 
         def slow_first_chunk():
             time.sleep(0.8)
@@ -608,6 +609,21 @@ class TestInMemoryQueueMessageHandler:
 
         with pytest.raises(RuntimeError, match="心跳超时"):
             list(helper.stream(slow_first_chunk()))
+
+    def test_stream_extends_wait_when_producer_alive(self, handler, monkeypatch):
+        """producer 仍存活且产出间隔超过 HEARTBEAT_TIMEOUT 但未超 TIMEOUT*4 时，
+        consumer 延长等待，不误判 starved，最终收到 producer 的迟到 chunk。"""
+        thread_id = "test_stream_heartbeat_extend"
+        helper = GeneratorStreamingHelper(handler, thread_id=thread_id)
+        monkeypatch.setattr(streaming_helper_module, "HEARTBEAT_INTERVAL", 1.0)  # 不发心跳
+        monkeypatch.setattr(streaming_helper_module, "HEARTBEAT_TIMEOUT", 0.2)  # *4=0.8s
+
+        def slow_first_chunk():
+            time.sleep(0.6)  # > 0.5s 首次 timeout，但 < 0.8s 延长阈值
+            yield "late_chunk"
+
+        result = list(helper.stream(slow_first_chunk()))
+        assert result == ["late_chunk"]
 
 
 class TestMessageHandlerConfig:

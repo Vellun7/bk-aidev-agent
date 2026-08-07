@@ -128,6 +128,8 @@ class BaseSessionWriter(ABC):
         self._content_ids_by_message_id: dict[str, int] = {}
         # 用于追踪本次运行是否因用户取消/暂停而结束
         self._is_cancelled: bool = False
+        # 取消补写是否已完成（防止 RUN_ERROR + fallback RUN_FINISHED 重复写「用户已取消」）
+        self._cancelled_messages_written: bool = False
         # 用于追踪 handle_model_end 是否已成功回写 assistant 消息
         # 当 on_chat_model_end 触发时，assistant 消息已完整输出，取消时不应再补写暂停消息
         self._model_end_written: bool = False
@@ -471,14 +473,15 @@ class BaseSessionWriter(ABC):
                 reasoning_content=thinking_content,
             )
 
-            # 取消场景：补写"用户已取消" + status=fail
-            if self._is_cancelled:
+            # 取消场景：补写"用户已取消" + status=fail（RUN_ERROR 已写过则跳过）
+            if self._is_cancelled and not self._cancelled_messages_written:
                 self._write_assistant_message(
                     message_id=fallback_message_id,
                     content=self.PAUSED_CONTENT_MESSAGE,
                     tool_calls=[],
                     status="fail",
                 )
+                self._cancelled_messages_written = True
             else:
                 self._write_assistant_message(
                     message_id=fallback_message_id,
@@ -632,6 +635,16 @@ class BaseSessionWriter(ABC):
         Args:
             thinking_content: 已累积的 thinking 内容
         """
+        if self._cancelled_messages_written:
+            logger.info(
+                "Skip duplicate cancelled messages: session_code=%s",
+                self.session_code,
+            )
+            self._streaming_messages.clear()
+            self._thinking_content = ""
+            self._thinking_active = False
+            return
+
         logger.info(
             "Writing cancelled messages: session_code=%s, has_thinking=%s, streaming_messages=%d, _is_cancelled=%s",
             self.session_code,
@@ -670,6 +683,7 @@ class BaseSessionWriter(ABC):
             status="fail",
         )
         self._written_message_ids.add(paused_message_id)
+        self._cancelled_messages_written = True
 
         # 清理
         self._streaming_messages.clear()

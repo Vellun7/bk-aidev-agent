@@ -396,6 +396,20 @@ class GeneratorStreamingHelper:
         except Exception as e:
             logger.exception(f"{error_prefix}: {e}")
 
+    def _has_cross_process_cancel_signal(self) -> bool:
+        """是否存在跨进程 stop/cancel 信号（stream 冷启动窗口内不应清掉）。"""
+        try:
+            return bool(self.message_handler.check_cancel_signal(self.thread_id))
+        except Exception:
+            logger.exception("Error checking cross-process cancel signal for thread_id=%s", self.thread_id)
+            return False
+
+    def _should_skip_fallback_event_handler(self, cancel_event: threading.Event | None) -> bool:
+        """Producer fallback RUN_FINISHED 是否跳过 event_handler（避免重复落库）。"""
+        if cancel_event is not None and cancel_event.is_set():
+            return True
+        return self._has_cross_process_cancel_signal()
+
     def _notify_consumer_cancelled_safely(self) -> None:
         """安全发送消费者取消完成通知，避免异常打断主流程。
 
@@ -879,7 +893,9 @@ class GeneratorStreamingHelper:
         # 清理上一次可能残留的跨进程取消信号
         # 场景：前端先调用 stop（设置取消信号），然后立刻发起重新生成
         # 如果不清理，新的流会立刻检测到旧的取消信号而被误取消
-        self._clear_cancel_signal_safely("Error clearing old cancel signal")
+        # 例外：当前已有 stop 信号（chat 冷启动期间用户点停）时保留，供 cancel_checker 消费
+        if not self._has_cross_process_cancel_signal():
+            self._clear_cancel_signal_safely("Error clearing old cancel signal")
 
         # 注册为当前活跃消费者
         consumer_id = self.message_handler.acquire_consumer(self.thread_id)
@@ -1174,17 +1190,21 @@ class GeneratorStreamingHelper:
 
             try:
                 if expected_run_id and not producer_error and not draining and not run_finished_seen:
+                    fallback_handler = (
+                        None if self._should_skip_fallback_event_handler(cancel_event) else event_handler
+                    )
                     logger.warning(
-                        "[RUN_FINISHED] missing from normal producer stream; emitting fallback thread_id=%s run_id=%s",
+                        "[RUN_FINISHED] missing from normal producer stream; emitting fallback thread_id=%s run_id=%s skip_handler=%s",
                         self.thread_id,
                         expected_run_id,
+                        fallback_handler is None,
                     )
                     self.message_handler.put(
                         self.thread_id,
                         emit_run_finished_event(
                             thread_id=self.thread_id,
                             run_id=expected_run_id,
-                            event_handler=event_handler,
+                            event_handler=fallback_handler,
                         ),
                     )
                     _complete_session()

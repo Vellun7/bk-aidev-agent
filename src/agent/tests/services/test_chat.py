@@ -1516,6 +1516,21 @@ class TestSessionWriterCancelUnit:
         """PAUSED_CONTENT_MESSAGE 和 RunId.CANCELLED_MESSAGE 应一致为"用户已取消" """
         assert BaseSessionWriter.PAUSED_CONTENT_MESSAGE == RunId.CANCELLED_MESSAGE == "用户已取消"
 
+    def test_run_error_then_fallback_run_finished_writes_paused_once(self):
+        """RUN_ERROR(cancel) 后 fallback RUN_FINISHED 不应重复补写「用户已取消」。"""
+        writer = _ConcreteWriter()
+        writer.handle_run_error(RunErrorEvent(type=EventType.RUN_ERROR, message=RunId.CANCELLED_MESSAGE))
+        writer.handle_run_finished(
+            RunFinishedEvent(type=EventType.RUN_FINISHED, thread_id="t1", run_id="11100"),
+        )
+
+        paused = [
+            c
+            for c in writer.created_contents
+            if c.get("content") == "用户已取消" and c.get("status") == "fail"
+        ]
+        assert len(paused) == 1
+
 
 # ---------------------------------------------------------------------------
 # TestAgentFactory2Chat: 验证 AgentFactory → ChatBuilder → ChatCompletionAgent

@@ -229,6 +229,8 @@ class WxAiBotViewSet(ViewSet):
         user_input = parts[1].strip()
         if not user_input:
             return stream_msg(EMPTY_INPUT_PROMPT, True, stream_id), ""
+        if user_input in NEW_CONVERSATION_CMDS:
+            return self._new_conversation(context.group_id, stream_id), ""
         return None, user_input
 
     def _process_quote(self, payload: dict, content: str) -> str:

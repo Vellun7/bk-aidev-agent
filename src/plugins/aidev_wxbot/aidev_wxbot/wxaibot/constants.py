@@ -8,8 +8,8 @@ WxAiBot 常量定义。
 EMPTY_INPUT_PROMPT = "请输入您想要咨询的内容~"
 WRONG_MENTION_PROMPT = "请先@本机器人，然后输入您想要咨询的内容~"
 
-# 新会话命令
-NEW_CONVERSATION_CMDS = frozenset({"会话", "新会话"})
+# 新会话命令：精确匹配用户文本，不进模型
+NEW_CONVERSATION_CMDS = frozenset({"/new"})
 
 # 聊天类型
 GROUP_CHAT_TYPE = "group"

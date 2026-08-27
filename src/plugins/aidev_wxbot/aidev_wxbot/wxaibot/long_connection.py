@@ -28,6 +28,14 @@ from ..utils.rabbitmq import rabbitmq_client
 logger = getLogger(__name__)
 
 
+def _preview_text(content: str, limit: int = 80) -> str:
+    """日志预览，避免把整段流式正文打进 INFO。"""
+    normalized = content.replace("\n", " ")
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit]}..."
+
+
 class LongConnectionConfigError(ValueError):
     """长连接配置缺失或非法。"""
 
@@ -176,6 +184,7 @@ class WxAiBotLongConnectionService:
         self._startup_failed_event: asyncio.Event | None = None
         self._startup_error: Exception | None = None
         self._frame_semaphore = asyncio.Semaphore(int(getattr(settings, "WXAIBOT_WS_MAX_INFLIGHT_FRAMES", 16)))
+        self._first_real_push_logged: set[str] = set()
         self._client = WSClient(
             WSClientOptions(
                 bot_id=self._config.bot_id,
@@ -305,10 +314,28 @@ class WxAiBotLongConnectionService:
             logger.warning("[WxAiBot-WS] 收到空帧，已忽略: %s", frame)
             return
 
+        headers = frame.get("headers") or {}
+        logger.info(
+            "[WxAiBot-WS] 入口收到帧 | msgtype=%s msgid=%s chattype=%s req_id=%s",
+            payload.get("msgtype"),
+            payload.get("msgid"),
+            payload.get("chattype"),
+            headers.get("req_id"),
+        )
+
         async with self._frame_semaphore:
             if self._shutdown_requested:
                 return
             response = await asyncio.to_thread(self._view._reply_wxaibot, payload)
+            stream = (response or {}).get("stream") or {}
+            logger.info(
+                "[WxAiBot-WS] 业务处理完成 | msgtype=%s stream_id=%s finish=%s content_len=%s preview=%s",
+                (response or {}).get("msgtype"),
+                stream.get("id", ""),
+                stream.get("finish"),
+                len(stream.get("content") or ""),
+                _preview_text(stream.get("content") or ""),
+            )
             await self._dispatch_response(frame, payload, response)
 
     async def _dispatch_response(
@@ -334,12 +361,19 @@ class WxAiBotLongConnectionService:
 
         if not content:
             if finish:
-                logger.debug("[WxAiBot-WS] 空结束帧跳过发送, stream_id=%s", stream_id)
+                logger.info("[WxAiBot-WS] 空结束帧跳过发送, stream_id=%s", stream_id)
                 return
-            logger.debug("[WxAiBot-WS] 空中间帧跳过发送, stream_id=%s", stream_id)
+            logger.info("[WxAiBot-WS] 空中间帧跳过发送，启动 forwarder, stream_id=%s", stream_id)
             self._start_stream_forwarder(frame, stream_id)
             return
 
+        logger.info(
+            "[WxAiBot-WS] 准备推流 | stream_id=%s finish=%s placeholder=%s content_len=%s",
+            stream_id,
+            finish,
+            content == THINKING_MSG,
+            len(content),
+        )
         await self._send_stream_reply(frame, stream_id, content, finish)
         if not finish:
             # 首包已发送，转发给后续轮询时跳过同一快照，避免重复推给企微。
@@ -360,9 +394,10 @@ class WxAiBotLongConnectionService:
     ) -> None:
         existing_task = self._stream_tasks.get(stream_id)
         if existing_task and not existing_task.done():
-            logger.debug("[WxAiBot-WS] stream forwarder 已存在, stream_id=%s", stream_id)
+            logger.info("[WxAiBot-WS] stream forwarder 已存在, stream_id=%s", stream_id)
             return
 
+        logger.info("[WxAiBot-WS] 启动 stream forwarder, stream_id=%s", stream_id)
         task = asyncio.create_task(self._forward_stream_replies(frame, stream_id, last_signature))
         task.add_done_callback(lambda finished_task, sid=stream_id: self._cleanup_stream_task(sid, finished_task))
         self._stream_tasks[stream_id] = task
@@ -389,6 +424,13 @@ class WxAiBotLongConnectionService:
             signature = (content, finish)
 
             if content == THINKING_MSG:
+                now = time.monotonic()
+                last_logged = getattr(self, "_thinking_wait_logged", {}).get(stream_id, 0)
+                if now - last_logged >= 5:
+                    if not hasattr(self, "_thinking_wait_logged"):
+                        self._thinking_wait_logged = {}
+                    self._thinking_wait_logged[stream_id] = now
+                    logger.info("[WxAiBot-WS] 队列仍无正文，继续等待 | stream_id=%s", stream_id)
                 await asyncio.sleep(0.5)
                 continue
 
@@ -420,11 +462,30 @@ class WxAiBotLongConnectionService:
             if self._shutdown_requested and not self._client.is_connected:
                 raise asyncio.CancelledError()
             if not self._client.is_connected:
+                logger.warning("[WxAiBot-WS] 连接未就绪，等待重连后再推流 | stream_id=%s", stream_id)
                 await asyncio.sleep(1)
                 continue
 
             try:
                 await self._client.reply_stream(frame, stream_id, content, finish)
+                is_placeholder = content == THINKING_MSG
+                first_pushed = getattr(self, "_first_real_push_logged", None)
+                if first_pushed is None:
+                    self._first_real_push_logged = set()
+                    first_pushed = self._first_real_push_logged
+                first_real = not is_placeholder and stream_id not in first_pushed
+                if first_real:
+                    first_pushed.add(stream_id)
+                logger.info(
+                    "[WxAiBot-WS] 流式推送成功 | stream_id=%s finish=%s placeholder=%s first_real=%s "
+                    "content_len=%s preview=%s",
+                    stream_id,
+                    finish,
+                    is_placeholder,
+                    first_real,
+                    len(content),
+                    _preview_text(content),
+                )
                 return
             except Exception as error:
                 last_error = error

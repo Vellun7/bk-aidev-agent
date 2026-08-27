@@ -159,7 +159,13 @@ class LlmChunkMsg(BaseModel):
                 if queue_info and queue_info.get("message_count", 0) > 0:
                     break
                 else:
-                    logger.info(f"stream_id:{self.stream_id} 消息还未有第一次回复...")
+                    logger.info(
+                        "stream_id:%s 队列仍无首包 | waited=%.1fs attempt=%s/%s",
+                        self.stream_id,
+                        time.time() - stream_time,
+                        i + 1,
+                        3,
+                    )
                     time.sleep(1)
             else:
                 return stream_msg(THINKING_MSG, self.is_finish, self.stream_id)
@@ -210,7 +216,13 @@ class LlmChunkMsg(BaseModel):
                     content += self.docs_content
                 except Exception as e:
                     logger.error(f"stream_id:{self.stream_id} 删除队列 {queue_name} 失败: {e}")
-            logger.info(f"stream_id:{self.stream_id} 回复的内容: {content}")
+            logger.info(
+                "stream_id:%s 从队列读到回复 | finish=%s content_len=%s preview=%s",
+                self.stream_id,
+                self.is_finish,
+                len(content),
+                content.replace("\n", " ")[:80],
+            )
             return stream_msg(content, self.is_finish, self.stream_id)
         except Exception as e:
             logger.error(f"stream_id:{self.stream_id} wxaibot_msg_json_from_cache 出错: {e}")

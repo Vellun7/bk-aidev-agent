@@ -92,12 +92,19 @@ def consume_chat_stream(
     added_content = ""
     think_content = ""
     first_logged = False
+    first_text_logged = False
+    first_queue_logged = False
 
     try:
         for chunk_json in iter_sse_lines(stream_generator, stream_id):
             if not first_logged:
                 first_logged = True
-                logger.info(f"stream_id:{stream_id} chat 首次响应耗时: {time.time() - start_time:.3f}s")
+                logger.info(
+                    "stream_id:%s chat 首次 SSE 到达 | elapsed=%.3fs event=%s",
+                    stream_id,
+                    time.time() - start_time,
+                    chunk_json.get("type", ""),
+                )
 
             event_type = chunk_json.get("type", "")
 
@@ -105,15 +112,29 @@ def consume_chat_stream(
                 text_content = chunk_json.get("delta", "")
                 if text_content == "正在思考...":
                     continue
+                if not first_text_logged:
+                    first_text_logged = True
+                    logger.info(
+                        "stream_id:%s chat 首次正文 delta | elapsed=%.3fs preview=%s",
+                        stream_id,
+                        time.time() - start_time,
+                        text_content.replace("\n", " ")[:80],
+                    )
                 added_content += text_content
                 if think_content:
                     llm_chunk.think_content = llm_chunk.think_content + think_content
                     llm_chunk.append_to_cache(rabbitmq_client)
                     think_content = ""
+                    if not first_queue_logged:
+                        first_queue_logged = True
+                        logger.info("stream_id:%s 首次写入队列（think）", stream_id)
                 if len(added_content) > CHUNK_FLUSH_THRESHOLD:
                     llm_chunk.content = llm_chunk.content + added_content
                     llm_chunk.append_to_cache(rabbitmq_client)
                     added_content = ""
+                    if not first_queue_logged:
+                        first_queue_logged = True
+                        logger.info("stream_id:%s 首次写入队列（content flush） content_len=%s", stream_id, len(llm_chunk.content))
 
             elif event_type == EventType.THINKING_TEXT_MESSAGE_CONTENT:
                 think_text = chunk_json.get("delta", "")
@@ -121,6 +142,9 @@ def consume_chat_stream(
                     continue
                 if not think_content:
                     LlmChunkMsg(stream_id=stream_id).append_to_cache(rabbitmq_client)
+                    if not first_queue_logged:
+                        first_queue_logged = True
+                        logger.info("stream_id:%s 首次写入队列（think 开始）", stream_id)
                 think_content += think_text
                 if len(think_content) > CHUNK_FLUSH_THRESHOLD:
                     llm_chunk.think_content = llm_chunk.think_content + think_content
@@ -133,6 +157,11 @@ def consume_chat_stream(
                         docs.append(doc_info["metadata"])
 
             elif event_type == EventType.RUN_ERROR:
+                logger.error(
+                    "stream_id:%s chat RUN_ERROR，写入失败结束包 | message=%s",
+                    stream_id,
+                    chunk_json.get("message", chunk_json),
+                )
                 LlmChunkMsg(
                     content=f"处理请求时发生错误: {chunk_json.get('message', chunk_json)}",
                     is_finish=True,
@@ -158,6 +187,12 @@ def consume_chat_stream(
     llm_chunk.is_finish = True
     llm_chunk.docs = docs
     llm_chunk.append_to_cache(rabbitmq_client)
+    logger.info(
+        "stream_id:%s chat 流写入结束 | finish=True content_len=%s think_len=%s",
+        stream_id,
+        len(llm_chunk.content),
+        len(llm_chunk.think_content),
+    )
 
 
 def consume_flow_stream(
@@ -181,7 +216,12 @@ def consume_flow_stream(
         for chunk_json in iter_sse_lines(stream_generator, stream_id):
             if not first_logged:
                 first_logged = True
-                logger.info(f"stream_id:{stream_id} flow 首次响应耗时: {time.time() - start_time:.3f}s")
+                logger.info(
+                    "stream_id:%s flow 首次 SSE 到达 | elapsed=%.3fs event=%s",
+                    stream_id,
+                    time.time() - start_time,
+                    chunk_json.get("type", ""),
+                )
 
             event_type = chunk_json.get("type", "")
 

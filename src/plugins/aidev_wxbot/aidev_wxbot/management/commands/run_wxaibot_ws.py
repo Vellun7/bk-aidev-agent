@@ -1,6 +1,7 @@
 """启动企业微信机器人长连接。"""
 
 import os
+from logging import getLogger
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -12,6 +13,8 @@ from aidev_wxbot.wxaibot.long_connection import (
     WxAiBotLongConnectionConfig,
     WxAiBotLongConnectionService,
 )
+
+logger = getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -52,4 +55,10 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
 
         self.stdout.write(self.style.SUCCESS(f"启动企微机器人长连接服务, bot_id={config.bot_id}"))
+        logger.info(
+            "[WxAiBot-WS] 命令入口启动 | bot_id=%s ws_url=%s connection_type=%s",
+            config.bot_id,
+            config.ws_url,
+            connection_type,
+        )
         WxAiBotLongConnectionService(config).run()

@@ -59,12 +59,19 @@ class WxAiBotViewSet(ViewSet):
     def _reply_wxaibot(self, payload: dict) -> dict:
         """处理微信AI机器人的回复逻辑"""
         msg_type = payload["msgtype"]
+        logger.info(
+            "[WxAiBot] 入口处理消息 | msgtype=%s msgid=%s chattype=%s",
+            msg_type,
+            payload.get("msgid"),
+            payload.get("chattype"),
+        )
         if msg_type == "text":
             return_msg = self._reply_text(payload)
         elif msg_type == "event":
             return_msg = self._reply_event(payload)
         elif msg_type == "stream":
             stream_id = payload["stream"]["id"]
+            logger.info("[WxAiBot] 入口拉取流式队列 | stream_id=%s", stream_id)
             return_msg = self._reply_stream(stream_id)
         else:
             return_msg = {
@@ -75,6 +82,14 @@ class WxAiBotViewSet(ViewSet):
                     "content": "您输入的内容我无法识别呢~",
                 },
             }
+        stream = (return_msg or {}).get("stream") or {}
+        logger.info(
+            "[WxAiBot] 入口返回 | msgtype=%s stream_id=%s finish=%s content_len=%s",
+            (return_msg or {}).get("msgtype"),
+            stream.get("id", ""),
+            stream.get("finish"),
+            len(stream.get("content") or ""),
+        )
         return return_msg
 
     @staticmethod
@@ -150,8 +165,14 @@ class WxAiBotViewSet(ViewSet):
             # 生成上下文和 stream_id
             current_context = ContextGenerator(payload).generate()
             stream_id = f"{current_context.msg_id}_{int(time.time())}"
-            logger.debug(
-                f"[WxAiBot] 收到消息 | chat_type={chat_type}, sender={current_context.sender_id}, stream_id={stream_id}"
+            logger.info(
+                "[WxAiBot] 收到文本消息 | chat_type=%s sender=%s group_id=%s stream_id=%s content_len=%s preview=%s",
+                chat_type,
+                current_context.sender_id,
+                current_context.group_id,
+                stream_id,
+                len(content),
+                content.replace("\n", " ")[:80],
             )
             # 根据聊天类型分发处理，获取处理后的内容或立即返回的响应
             if chat_type == GROUP_CHAT_TYPE:
@@ -165,6 +186,7 @@ class WxAiBotViewSet(ViewSet):
             content = self._process_quote(payload, content)
             # 启动异步处理
             self._start_async_processing(content, stream_id, current_context)
+            logger.info("[WxAiBot] 已回占位首包并启动异步处理 | stream_id=%s placeholder=正在思考中...", stream_id)
             return stream_msg("正在思考中...", False, stream_id)
 
         except (KeyError, AttributeError) as e:
@@ -261,8 +283,12 @@ class WxAiBotViewSet(ViewSet):
             stream_id: 流式响应 ID
             context: 消息上下文
         """
-        logger.debug(
-            f"[WxAiBot] 启动异步处理 | stream_id={stream_id}, content_len={len(content)}, sender={context.sender_id}"
+        logger.info(
+            "[WxAiBot] 启动异步处理 | stream_id=%s content_len=%s sender=%s group_id=%s",
+            stream_id,
+            len(content),
+            context.sender_id,
+            context.group_id,
         )
 
         thread = threading.Thread(
@@ -312,9 +338,21 @@ class WxAiBotViewSet(ViewSet):
         views 层只负责会话管理和线程调度，不关心具体 Agent 实现。
         """
         try:
-            logger.debug(f"[WxAiBot] 发送至Agent | stream_id:{stream_id}, content_len={len(content)}")
+            logger.info(
+                "[WxAiBot] 异步线程开始执行 Agent | stream_id=%s username=%s group_id=%s content_len=%s",
+                stream_id,
+                username,
+                group_id,
+                len(content),
+            )
             thread_id = self._get_or_create_thread_id(group_id)
             strategy = resolve_strategy(username)
+            logger.info(
+                "[WxAiBot] 即将调用 strategy.execute | stream_id=%s thread_id=%s strategy=%s",
+                stream_id,
+                thread_id,
+                type(strategy).__name__,
+            )
             strategy.execute(
                 content=content,
                 stream_id=stream_id,
@@ -323,9 +361,10 @@ class WxAiBotViewSet(ViewSet):
                 group_id=group_id,
                 rabbitmq_client=rabbitmq_client,
             )
+            logger.info("[WxAiBot] strategy.execute 完成 | stream_id=%s thread_id=%s", stream_id, thread_id)
         except ConsumerPreemptedError:
-            # 消费者被抢占是框架正常行为，静默处理，不返回错误给用户
-            logger.debug(f"stream_id:{stream_id} consumer 被新请求抢占，当前请求终止")
+            # 消费者被抢占是框架正常行为，不返回错误给用户，但必须打 INFO 便于对照并发
+            logger.info(f"stream_id:{stream_id} consumer 被新请求抢占，当前请求终止")
         except Exception as e:
             logger.exception(f"stream_id:{stream_id} 异步处理AI请求失败: {e}")
             try:

@@ -78,6 +78,15 @@ class ChatAgentStrategy:
         rabbitmq_client: RabbitMQClient,
     ) -> None:
         start_time = time.time()
+        logger.info(
+            "[WxAiBot] ChatAgentStrategy.execute 开始 | stream_id=%s thread_id=%s username=%s "
+            "group_id=%s content_len=%s （此后可能阻塞在 MCP list_tools）",
+            stream_id,
+            thread_id,
+            username,
+            group_id,
+            len(content),
+        )
         execute_kwargs = build_execute_kwargs(
             {"stream": True, "thread_id": thread_id, "executor": username, "group_id": group_id},
             username,
@@ -90,10 +99,18 @@ class ChatAgentStrategy:
             channel_type=ChannelType.RTX.value,
             save_content=True,
         )
-        logger.info(f"stream_id:{stream_id} chat agent ok, session_code={session_code}")
+        logger.info(
+            "stream_id:%s chat agent ok, session_code=%s elapsed=%.3fs stream=%s",
+            stream_id,
+            session_code,
+            time.time() - start_time,
+            execute_kwargs.stream,
+        )
 
         if execute_kwargs.stream:
+            logger.info("stream_id:%s 开始 consume_chat_stream", stream_id)
             consume_chat_stream(result, stream_id, start_time, rabbitmq_client)
+            logger.info("stream_id:%s consume_chat_stream 结束", stream_id)
             return
 
         # 非流式兜底
@@ -135,6 +152,12 @@ class FlowAgentStrategy:
         rabbitmq_client: RabbitMQClient,
     ) -> None:
         start_time = time.time()
+        logger.info(
+            "[WxAiBot] FlowAgentStrategy.execute 开始 | stream_id=%s thread_id=%s username=%s",
+            stream_id,
+            thread_id,
+            username,
+        )
 
         # 1. username 由 ContextGenerator 通过 convert_to_rtx 转换而来
         rtx_username = username
@@ -177,6 +200,7 @@ class FlowAgentStrategy:
         generator = agent_instance.execute()
         logger.info(f"stream_id:{stream_id} flow agent started, session_code={session_code}")
         consume_flow_stream(generator, stream_id, start_time, rabbitmq_client, session_code=session_code)
+        logger.info("stream_id:%s consume_flow_stream 结束", stream_id)
 
 
 # ---------------------------------------------------------------------------

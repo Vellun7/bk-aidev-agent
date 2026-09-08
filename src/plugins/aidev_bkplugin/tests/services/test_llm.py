@@ -21,11 +21,19 @@ def test_list_llms_uses_injected_resource_manager_client():
 
     mock_cls.assert_not_called()
     rm.get_client.assert_called_once_with()
-    client.api.list_agents_v1_llms.assert_called_once_with(
-        params={},
-        headers={"X-BKAIDEV-USER": "alice"},
-    )
+    client.api.list_agents_v1_llms.assert_called_once_with(params={})
     assert result == [{"llm_code": "qwen-plus"}]
+
+
+def test_list_llms_does_not_send_user_header():
+    """有 username 也不带 X-BKAIDEV-USER，避免应用态 JWT 下平台 IAM Subject 为空。"""
+    rm = MagicMock(name="request_rm")
+    rm.get_client.return_value.api.list_agents_v1_llms.return_value = {"data": []}
+
+    LLMService.list_llms(username="alice", resource_manager=rm)
+
+    _, kwargs = rm.get_client.return_value.api.list_agents_v1_llms.call_args
+    assert "headers" not in kwargs or "X-BKAIDEV-USER" not in (kwargs.get("headers") or {})
 
 
 def test_is_llm_accessible_forwards_resource_manager_to_list_llms():

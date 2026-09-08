@@ -18,8 +18,9 @@ logger = getLogger(__name__)
 class LLMService:
     """调平台 llm 列表网关接口（``/resource/v1/agents/llms/``）。
 
-    走 APIGW 用户态鉴权：``AgentResourceManager(username=...)`` 注入 ``bk_username`` / ``access_token``，
-    满足 APIGW 对用户身份的要求；``X-BKAIDEV-USER`` header 同步透传给平台做用户权限过滤。
+    走 APIGW 应用态鉴权：``AgentResourceManager(username=...)`` 注入 ``bk_username`` / ``access_token``。
+    不传 ``X-BKAIDEV-USER``：应用态 JWT 下平台 ``request.user`` 为空，带该头会走进 IAM
+    且 Subject 为空，整接口 500；不带头时平台降级为公开 + 空间授权模型。
     空间由平台侧 ``AppLLMListView``（继承 ``AIDevBaseView``）从 ``app_code`` 解析 ``AgentPlugin.space_id`` 得到，
     无需 agent 透传 ``space_id``。
     """
@@ -38,7 +39,8 @@ class LLMService:
         无需 agent 透传 ``space_id``。
 
         Args:
-            username: 用户名，透传给平台做用户权限过滤；为空时平台仅返回公开 + 空间授权模型。
+            username: 传给 ``AgentResourceManager`` 做 APIGW ``bk_username``；
+                不写入 ``X-BKAIDEV-USER``，避免应用态 JWT 下平台 IAM Subject 为空。
             llm_type: 模型类型过滤，不传时平台默认 chat.completion。
             fuzzy: 模糊搜索关键词。
             supports: 按模型支持的功能过滤，逗号分隔字符串（如 ``tool_call,vision``），
@@ -47,7 +49,7 @@ class LLMService:
         Returns:
             平台返回的模型精简列表（llm_code/llm_name/llm_type/icon/...）。
         """
-        # 用户态 client：传 bk_username 给 APIGW 用户身份鉴权
+        # 应用态 client：bk_username 给 APIGW，不传 X-BKAIDEV-USER
         rm = resource_manager or AgentResourceManager(username=username)
         client = rm.get_client()
         params: dict[str, Any] = {}
@@ -57,8 +59,7 @@ class LLMService:
             params["fuzzy"] = fuzzy
         if supports:
             params["supports"] = supports
-        headers = {"X-BKAIDEV-USER": username} if username else {}
-        result = client.api.list_agents_v1_llms(params=params, headers=headers)
+        result = client.api.list_agents_v1_llms(params=params)
         return result.get("data", []) or []
 
     @staticmethod
